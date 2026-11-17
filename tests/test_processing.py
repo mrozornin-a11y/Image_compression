@@ -179,11 +179,11 @@ class ProcessingTest(unittest.TestCase):
             self.assertTrue(os.path.isdir(os.path.join(out, d)), d)
 
         out_files = {os.path.relpath(os.path.join(c, f), out) for c, _, fs in os.walk(out) for f in fs}
-        expected = {e.rel_path for e in self.scan.files if not e.is_image or e.is_selected(MODE_NUMBERED)}
+        expected = {e.rel_path for e in self.scan.files}  # копируются все файлы
         self.assertEqual(out_files, expected)
 
-        # прочие файлы скопированы без изменений
-        for e in self.scan.others:
+        # прочие файлы и изображения, исключённые фильтром, скопированы без изменений
+        for e in self.scan.others + [x for x in self.scan.images if not x.is_selected(MODE_NUMBERED)]:
             self.assertEqual(file_hash(os.path.join(out, e.rel_path)), file_hash(os.path.join(self.src, e.rel_path)))
 
         # разрешение не изменилось, страницы сохранены
@@ -232,6 +232,7 @@ class ProcessingTest(unittest.TestCase):
         self.assertEqual(stats.errors, 1, logs)  # повреждённый JPEG
         self.assertEqual(stats.images_processed, 11)
         self.assertEqual(stats.others_copied, 2)
+        self.assertEqual(stats.images_copied, 5)
         self.assertFalse(stats.cancelled)
         self.assertGreater(stats.saved, 0)
         real_new = sum(os.path.getsize(os.path.join(out, e.rel_path))
@@ -240,16 +241,38 @@ class ProcessingTest(unittest.TestCase):
         self.assertEqual(stats.orig_images_size, sum(e.size for e in self.scan.images if e.is_selected(MODE_NUMBERED)))
 
         # повторный запуск в ту же папку — все файлы обнаружены как существующие
-        self.assertEqual(len(find_existing(self.scan, MODE_NUMBERED, out)), len(expected))
+        self.assertEqual(len(find_existing(self.scan, out)), len(expected))
 
     def test_process_other(self):
         out, stats, logs = self.run_mode(MODE_OTHER, "Обработанные Б")
         self.assertEqual(tree_snapshot(self.src), self.snapshot_before)
         out_files = {os.path.relpath(os.path.join(c, f), out) for c, _, fs in os.walk(out) for f in fs}
-        expected = {e.rel_path for e in self.scan.files if not e.is_image or e.is_selected(MODE_OTHER)}
-        self.assertEqual(out_files, expected)
+        self.assertEqual(out_files, {e.rel_path for e in self.scan.files})
         self.assertEqual(stats.errors, 0, logs)
         self.assertEqual(stats.images_processed, 5)
+        self.assertEqual(stats.images_copied, 11)
+        # повреждённый JPEG (исключён фильтром) просто скопирован — это не ошибка
+        bad = os.path.join("Г 144", "14. Повреждённый.jpg")
+        self.assertEqual(file_hash(os.path.join(out, bad)), file_hash(os.path.join(self.src, bad)))
+
+    def test_manual_overrides(self):
+        removed = os.path.join("Г 144", "93. Г 144 скрещенные.jpg")  # подходит под А, убран вручную
+        added = os.path.join("Г 144", "4_Г 144_отраж_5х.jpg")  # не подходит под А, добавлен вручную
+        overrides = {removed: False, added: True}
+        by_path = {e.rel_path: e for e in self.scan.files}
+        self.assertFalse(by_path[removed].is_selected(MODE_NUMBERED, overrides))
+        self.assertTrue(by_path[added].is_selected(MODE_NUMBERED, overrides))
+
+        out = os.path.join(self.tmp, "Ручной список")
+        stats = process(self.scan, MODE_NUMBERED, out, 92, overrides=overrides)
+        self.assertEqual(tree_snapshot(self.src), self.snapshot_before)
+        # убранное изображение скопировано байт в байт, добавленное — сжато
+        self.assertEqual(file_hash(os.path.join(out, removed)), file_hash(os.path.join(self.src, removed)))
+        self.assertLess(os.path.getsize(os.path.join(out, added)), os.path.getsize(os.path.join(self.src, added)))
+        self.assertEqual(stats.images_processed, 11)  # 11 по фильтру − 1 убранное + 1 добавленное
+        self.assertEqual(stats.images_copied, 5)
+        self.assertEqual(stats.orig_images_size,
+                         sum(e.size for e in self.scan.images if e.is_selected(MODE_NUMBERED, overrides)))
 
     def test_cancel(self):
         import threading

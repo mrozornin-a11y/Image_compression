@@ -1,4 +1,4 @@
-"""Обработка всей папки: структура каталогов, сжатие отобранных изображений, копирование прочих файлов."""
+"""Обработка всей папки: структура каталогов, сжатие отобранных изображений, копирование всех остальных файлов."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ class ProcessStats:
     images_processed: int = 0  # сохранено изображений в выходной папке
     images_compressed: int = 0  # из них уменьшено
     images_kept: int = 0  # из них сохранён оригинал
+    images_copied: int = 0  # изображения вне списка — скопированы без изменений
     others_copied: int = 0
     errors: int = 0
     orig_images_size: int = 0  # исходный размер обработанных изображений
@@ -36,22 +37,19 @@ class ProcessStats:
         return 100.0 * self.saved / self.orig_images_size if self.orig_images_size else 0.0
 
 
-def plan_tasks(scan: ScanResult, mode: str) -> list:
-    """Список (FileEntry, is_selected_image): выбранные изображения и все прочие файлы."""
-    tasks = []
-    for entry in scan.files:
-        if entry.is_image:
-            if entry.is_selected(mode):
-                tasks.append((entry, True))
-        else:
-            tasks.append((entry, False))
-    return tasks
+def plan_tasks(scan: ScanResult, mode: str, overrides: Optional[dict] = None) -> list:
+    """Список (FileEntry, сжимать ли) для всех файлов исходной папки.
+
+    Сжимаются только изображения из списка; остальные изображения и прочие файлы
+    копируются без изменений.
+    """
+    return [(entry, entry.is_selected(mode, overrides)) for entry in scan.files]
 
 
-def find_existing(scan: ScanResult, mode: str, out_root: str) -> list:
+def find_existing(scan: ScanResult, out_root: str) -> list:
     """Относительные пути файлов, которые уже существуют в выходной папке."""
     existing = []
-    for entry, _ in plan_tasks(scan, mode):
+    for entry in scan.files:
         if os.path.lexists(long_path(os.path.join(out_root, entry.rel_path))):
             existing.append(entry.rel_path)
     return existing
@@ -62,15 +60,16 @@ def process(
     mode: str,
     out_root: str,
     quality: int,
+    overrides: Optional[dict] = None,
     cancel_event: Optional[threading.Event] = None,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     on_log: Optional[Callable[[str], None]] = None,
 ) -> ProcessStats:
     src_root = scan.root
     out_root = os.path.normpath(os.path.abspath(out_root))
-    tasks = plan_tasks(scan, mode)
+    tasks = plan_tasks(scan, mode, overrides)
     stats = ProcessStats(total_files=len(tasks))
-    stats.selected_images_size = sum(e.size for e, is_img in tasks if is_img)
+    stats.selected_images_size = sum(e.size for e, compress in tasks if compress)
 
     def log(msg: str) -> None:
         if on_log:
@@ -94,7 +93,7 @@ def process(
             error(f"не удалось создать папку {rel_dir}: {e.strerror or e}")
 
     # 2–5. Файлы
-    for entry, is_selected_image in tasks:
+    for entry, compress in tasks:
         if cancel_event is not None and cancel_event.is_set():
             stats.cancelled = True
             break
@@ -104,7 +103,7 @@ def process(
         dst = os.path.join(out_root, entry.rel_path)
         try:
             os.makedirs(long_path(os.path.dirname(dst)), exist_ok=True)
-            if is_selected_image:
+            if compress:
                 result = compress_image(src, dst, quality)
                 orig = os.path.getsize(long_path(src))
                 stats.images_processed += 1
@@ -120,7 +119,10 @@ def process(
                     log(f"{entry.rel_path}: {result.message}")
             else:
                 copy_file(src, dst)
-                stats.others_copied += 1
+                if entry.is_image:
+                    stats.images_copied += 1
+                else:
+                    stats.others_copied += 1
         except OSError as e:
             error(f"{entry.rel_path}: ошибка чтения/записи — {e.strerror or e}")
         except Exception as e:  # на всякий случай: один файл не должен останавливать обработку

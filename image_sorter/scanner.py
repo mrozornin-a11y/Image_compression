@@ -43,11 +43,22 @@ class FileEntry:
     def is_numbered(self) -> bool:
         return bool(NUMBERED_RE.match(self.name))
 
-    def is_selected(self, mode: str) -> bool:
-        """Изображение соответствует выбранному режиму отбора."""
+    def matches_filter(self, mode: str) -> bool:
+        """Изображение соответствует выбранному режиму отбора по имени."""
         if not self.is_image:
             return False
         return self.is_numbered() if mode == MODE_NUMBERED else not self.is_numbered()
+
+    def is_selected(self, mode: str, overrides: Optional[dict] = None) -> bool:
+        """Изображение в списке на сжатие: фильтр по имени с учётом ручных изменений.
+
+        overrides: {относительный путь: True — добавлено вручную, False — убрано вручную}.
+        """
+        if not self.is_image:
+            return False
+        if overrides and self.rel_path in overrides:
+            return overrides[self.rel_path]
+        return self.matches_filter(mode)
 
 
 @dataclass
